@@ -9,6 +9,7 @@ defmodule Ockam.Hub do
 
   alias Ockam.Hub.Service.Alias, as: AliasService
   alias Ockam.Hub.Service.Echo, as: EchoService
+  alias Ockam.Hub.Service.Stream, as: StreamService
 
   alias Ockam.Transport
 
@@ -32,6 +33,8 @@ defmodule Ockam.Hub do
     EchoService.create(address: "echo_service")
 
     AliasService.create(address: "forwarding_service")
+
+    StreamService.create(address: "stream_service")
 
     # Specifications of child processes that will be started and supervised.
     #
