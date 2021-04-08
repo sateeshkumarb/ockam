@@ -1,4 +1,6 @@
 defmodule Ockam.Hub.Service.Stream do
+  @moduledoc false
+
   use Ockam.Worker
 
   alias Ockam.Hub.Service.Stream.Instance
@@ -26,7 +28,7 @@ defmodule Ockam.Hub.Service.Stream do
   end
 
   def decode_payload(payload) do
-    case :bare.decode(payload, request_spec()) do
+    case :bare.decode(payload, request_schema()) do
       {:ok, %{mailbox_name: name}, ""} ->
         {:ok, %{mailbox_name: name}}
 
@@ -47,7 +49,7 @@ defmodule Ockam.Hub.Service.Stream do
 
   ## TODO: response type with optional error
   def error_message() do
-    :bare.encode(%{error: "Invalid request"}, {:struct, [error: :string]})
+    :bare.encode(%{reason: "Invalid request"}, error_schema())
   end
 
   @spec ensure_stream(String.t(), map(), state()) :: state()
@@ -88,28 +90,53 @@ defmodule Ockam.Hub.Service.Stream do
   end
 
   @spec create_stream(String.t(), map(), state()) :: state()
-  def create_stream(name, message, state) do
+  def create_stream(create_name, message, state) do
+    name =
+      case create_name do
+        :undefined ->
+          create_mailbox_name(state)
+
+        _defined ->
+          create_name
+      end
+
     return_route = Message.return_route(message)
 
-    {:ok, address} = Instance.create(reply_route: return_route, stream_name: name)
+    {:ok, address} = Instance.create(reply_route: return_route, mailbox_name: name)
 
     register_stream(name, address, state)
+  end
+
+  def create_mailbox_name(state) do
+    random_string = "generated_" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+
+    case find_stream(random_string, state) do
+      {:ok, _} -> create_mailbox_name(state)
+      :error -> random_string
+    end
   end
 
   # type CreateMailboxRequest {
   #   mailbox_name: string
   # }
-  def request_spec() do
-    {:struct, [mailbox_name: :string]}
+  def request_schema() do
+    {:struct, [mailbox_name: {:optional, :string}]}
+  end
+
+  def error_schema() do
+    {:struct, [reason: :string]}
   end
 end
 
 defmodule Ockam.Hub.Service.Stream.Instance do
+  @moduledoc false
+
   use Ockam.Worker
 
   require Logger
 
   @type request() :: binary()
+  @type state() :: map()
 
   def notify(server, return_route) do
     GenServer.cast(server, {:notify, return_route})
@@ -117,18 +144,20 @@ defmodule Ockam.Hub.Service.Stream.Instance do
 
   @impl true
   def handle_cast({:notify, return_route}, state) do
-    reply_create_ok(return_route, state)
+    reply_init(state.mailbox_name, return_route, state)
     {:noreply, state}
   end
 
   @impl true
   def setup(options, state) do
     reply_route = Keyword.fetch!(options, :reply_route)
-    stream_name = Keyword.fetch!(options, :stream_name)
+    mailbox_name = Keyword.fetch!(options, :mailbox_name)
 
-    reply_create_ok(reply_route, state)
+    state = Map.merge(state, %{reply_route: reply_route, mailbox_name: mailbox_name})
 
-    {:ok, Map.merge(state, %{reply_route: reply_route, stream_name: stream_name})}
+    reply_init(mailbox_name, reply_route, state)
+
+    {:ok, state}
   end
 
   @impl true
@@ -161,56 +190,60 @@ defmodule Ockam.Hub.Service.Stream.Instance do
 
   def handle_decode_error(err, return_route, state) do
     Logger.error("Error decoding request: #{inspect(err)}")
-    error_reply = :bare.encode(%{reason: "invalid_request"}, error_schema())
+    error_reply = :bare.encode({error_schema(), %{reason: "invalid_request"}}, response_schema())
     send_reply(error_reply, return_route, state)
   end
 
   def handle_data({:push, push_request}, return_route, state) do
-    %{message_id: id, data: data} = push_request
+    %{request_id: id, data: data} = push_request
     {result, state} = save_message(data, state)
     reply_push_confirm(result, id, return_route, state)
     {:ok, state}
   end
 
   def handle_data({:pull, pull_request}, return_route, state) do
-    %{index: index, limit: limit} = pull_request
+    %{request_id: request_id, index: index, limit: limit} = pull_request
     messages = fetch_messages(index, limit, state)
-    send_messages(messages, return_route, state)
+    reply_pull_response(messages, request_id, return_route, state)
     {:ok, state}
   end
 
   ## Queue API
   ## TODO: this needs to be extracted
+
+  @spec save_message(any(), state()) :: {{:ok, integer()} | {:error, any()}, state()}
   def save_message(data, state) do
-    queue = Map.get(state, :queue, %{})
-    latest = Map.get(queue, :latest, 0)
+    storage = Map.get(state, :storage, %{})
+    latest = Map.get(storage, :latest, 0)
     next = latest + 1
     message = %{index: next, data: data}
 
-    new_queue =
-      queue
+    new_storage =
+      storage
       |> Map.put(next, message)
       |> Map.put(:latest, next)
 
-    {:ok, Map.put(state, :queue, new_queue)}
+    {{:ok, next}, Map.put(state, :storage, new_storage)}
   end
 
+  @spec fetch_messages(integer(), integer(), state()) :: [%{index: integer(), data: any()}]
   def fetch_messages(index, limit, state) do
-    queue = Map.get(state, :queue, %{})
-    earliest = Map.get(queue, :earliest, 0)
+    storage = Map.get(state, :storage, %{})
+    earliest = Map.get(storage, :earliest, 0)
     start_from = max(index, earliest)
     end_on = start_from + limit - 1
 
     ## Naive impl. Gaps are ignored as there shouldn't be any
     :lists.seq(start_from, end_on)
-    |> Enum.map(fn i -> Map.get(queue, i) end)
+    |> Enum.map(fn i -> Map.get(storage, i) end)
     |> Enum.reject(&is_nil/1)
   end
 
   ## Replies
 
-  def reply_create_ok(reply_route, state) do
-    send_reply("", reply_route, state)
+  def reply_init(mailbox_name, reply_route, state) do
+    init_payload = encode_init(mailbox_name)
+    send_reply(init_payload, reply_route, state)
   end
 
   def reply_push_confirm(result, id, return_route, state) do
@@ -218,11 +251,9 @@ defmodule Ockam.Hub.Service.Stream.Instance do
     send_reply(push_confirm, return_route, state)
   end
 
-  def send_messages(messages, return_route, state) do
-    Enum.each(messages, fn message ->
-      reply = encode_message(message)
-      send_reply(reply, return_route, state)
-    end)
+  def reply_pull_response(messages, request_id, return_route, state) do
+    response = encode_pull_response(messages, request_id)
+    send_reply(response, return_route, state)
   end
 
   defp send_reply(data, reply_route, state) do
@@ -236,35 +267,47 @@ defmodule Ockam.Hub.Service.Stream.Instance do
 
   ### Encode helpers
 
-  def encode_push_confirm(:ok, id) do
-    :bare.encode(%{status: :ok, message_id: id}, push_confirm_schema())
+  def encode_init(mailbox_name) do
+    :bare.encode({init_schema(), %{mailbox_name: mailbox_name}}, response_schema())
+  end
+
+  def encode_push_confirm({:ok, index}, id) do
+    :bare.encode({push_confirm_schema(), %{status: :ok, request_id: id, index: index}}, response_schema())
   end
 
   def encode_push_confirm({:error, error}, id) do
     Logger.error("Error saving message: #{inspect(error)}")
-    :bare.encode(%{status: :error, message_id: id}, push_confirm_schema())
+    :bare.encode({push_confirm_schema(), %{status: :error, request_id: id}}, response_schema())
   end
 
-  def encode_message(%{index: index, data: data}) do
-    :bare.encode(%{index: index, data: data}, message_schema())
+  def encode_pull_response(messages, request_id) do
+    :bare.encode({pull_response_schema(), %{request_id: request_id, messages: messages}}, response_schema())
   end
 
   ## BARE schemas:
 
+  # type Init {
+  #   mailbox_name: string
+  # }
+  def init_schema() do
+    {:struct, [mailbox_name: :string]}
+  end
+
   # type PushRequest {
-  #   message_id: i64
+  #   request_id: uint
   #   data: data
   # }
   def push_request_schema() do
-    {:struct, [message_id: :i64, data: :data]}
+    {:struct, [request_id: :uint, data: :data]}
   end
 
   # type PullRequest {
-  #   index: i64
-  #   limit: i64
+  #   request_id: uint
+  #   index: uint
+  #   limit: uint
   # }
   def pull_request_schema() do
-    {:struct, [index: :i64, limit: :i64]}
+    {:struct, [request_id: :uint, index: :uint, limit: :uint]}
   end
 
   # type Request (PushRequest | PullRequest)
@@ -277,19 +320,28 @@ defmodule Ockam.Hub.Service.Stream.Instance do
   #   ERROR
   # }
   # type PushConfirm {
-  #   message_id: i64
-  #   status: Status
+  #   request_id: uint
+  #   status: Status,
+  #   index: uint
   # }
   def push_confirm_schema() do
-    {:struct, [status: {:enum, [:ok, :error]}, message_id: :i64]}
+    {:struct, [request_id: :uint, status: {:enum, [:ok, :error]}, index: :uint]}
   end
 
   # type MailboxMessage {
-  #   index: i64
+  #   index: uint
   #   data: data
   # }
   def message_schema() do
-    {:struct, [index: :i64, data: :data]}
+    {:struct, [index: :uint, data: :data]}
+  end
+
+  # type PullResponse {
+  #   request_id: uint
+  #   messages: []MailboxMessage
+  # }
+  def pull_response_schema() do
+    {:struct, [request_id: :uint, messages: {:array, message_schema()}]}
   end
 
   # type Error {
@@ -297,5 +349,10 @@ defmodule Ockam.Hub.Service.Stream.Instance do
   # }
   def error_schema() do
     {:struct, [reason: :string]}
+  end
+
+  # type Response (Init | PushConfirm | PullResponse | Error)
+  def response_schema() do
+    {:union, [init_schema(), push_confirm_schema(), pull_response_schema(), error_schema()]}
   end
 end

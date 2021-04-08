@@ -14,6 +14,8 @@ defmodule Ockam.Examples.StreamExample do
 
     {:ok, publisher_address} = __MODULE__.Publisher.create(stream_name: stream_name)
 
+    Logger.info("Consumer #{inspect(consumer_address)} Publisher: #{inspect(publisher_address)}")
+
     :timer.sleep(5000)
 
     publisher = Ockam.Node.whereis(publisher_address)
@@ -47,35 +49,109 @@ defmodule Ockam.Examples.StreamExample do
   end
 
   def create_request(stream_name) do
-    :bare.encode(%{mailbox_name: stream_name}, {:struct, [mailbox_name: :string]})
+    :bare.encode(%{mailbox_name: stream_name}, {:struct, [mailbox_name: {:optional, :string}]})
   end
 
-  def parse_create_response(message) do
-    case Message.payload(message) do
-      "" -> {:ok, Message.return_route(message)}
-      _ -> :error
+  def parse_response(message) do
+    Logger.info("Received message #{inspect(message)}")
+    payload = Message.payload(message)
+    case :bare.decode(payload, response_schema()) do
+      {:ok, {type, data}, ""} ->
+        init = init_schema()
+        push_confirm = push_confirm_schema()
+        pull_response = pull_response_schema()
+        error = error_schema()
+
+        case type do
+          ^init -> {:init, data}
+          ^push_confirm -> {:push_confirm, data}
+          ^pull_response -> {:pull_response, data}
+          ^error -> {:error_response, data}
+        end
+      _ ->
+        case :bare.decode(payload, get_index_response_schema()) do
+          {:ok, %{} = data, ""} ->
+            {:index, data}
+          other ->
+            Logger.error("Error parsing response: #{inspect(payload)} #{inspect(other)}")
+            {:error, other}
+        end
     end
   end
 
+
+  # type Init {
+  #   mailbox_name: string
+  # }
+  def init_schema() do
+    {:struct, [mailbox_name: :string]}
+  end
+
   # type PushRequest {
-  #   message_id: i64
+  #   request_id: uint
   #   data: data
   # }
   def push_request_schema() do
-    {:struct, [message_id: :i64, data: :data]}
+    {:struct, [request_id: :uint, data: :data]}
   end
 
   # type PullRequest {
-  #   index: i64
-  #   limit: i64
+  #   request_id: uint
+  #   index: uint
+  #   limit: uint
   # }
   def pull_request_schema() do
-    {:struct, [index: :i64, limit: :i64]}
+    {:struct, [request_id: :uint, index: :uint, limit: :uint]}
   end
 
   # type Request (PushRequest | PullRequest)
   def request_schema() do
     {:union, [push_request_schema(), pull_request_schema()]}
+  end
+
+  # enum Status {
+  #   OK
+  #   ERROR
+  # }
+  # type PushConfirm {
+  #   request_id: uint
+  #   status: Status,
+  #   index: uint
+  # }
+  def push_confirm_schema() do
+    {:struct, [request_id: :uint, status: {:enum, [:ok, :error]}, index: :uint]}
+  end
+
+  # type MailboxMessage {
+  #   index: uint
+  #   data: data
+  # }
+  def message_schema() do
+    {:struct, [index: :uint, data: :data]}
+  end
+
+  # type PullResponse {
+  #   request_id: uint
+  #   messages: []MailboxMessage
+  # }
+  def pull_response_schema() do
+    {:struct, [request_id: :uint, messages: {:array, message_schema()}]}
+  end
+
+  # type Error {
+  #   reason: string
+  # }
+  def error_schema() do
+    {:struct, [reason: :string]}
+  end
+
+  # type Response (Init | PushConfirm | PullResponse | Error)
+  def response_schema() do
+    {:union, [init_schema(), push_confirm_schema(), pull_response_schema(), error_schema()]}
+  end
+
+  def get_index_response_schema() do
+    {:struct, [client_id: :string, index: :i64, mailbox_name: :string]}
   end
 end
 
@@ -83,6 +159,8 @@ defmodule Ockam.Examples.StreamExample.Consumer do
   use Ockam.Worker
 
   alias Ockam.Examples.StreamExample
+
+  alias Ockam.Message
 
   require Logger
 
@@ -103,20 +181,17 @@ defmodule Ockam.Examples.StreamExample.Consumer do
   def handle_message(message, state) do
     Logger.info("Consumer received message #{inspect(message)}")
 
-    case StreamExample.parse_create_response(message) do
-      {:ok, return_route} ->
-        {:ok, Map.put(state, :stream_address, return_route)}
+    case StreamExample.parse_response(message) do
+      {:init, _data} ->
+        {:ok, Map.put(state, :stream_address, Message.return_route(message))}
 
-      :error ->
-        case decode_message(message) do
-          {:message, data, index} ->
-            Logger.info("Message #{inspect(data)} with index #{inspect(index)}")
-            {:ok, state}
+      {:pull_response, data} ->
+        Logger.info("Response for request: #{inspect(data.request_id)} Messages: #{inspect(data.messages)}")
+        {:ok, state}
 
-          other ->
-            Logger.error("Unexpected message #{inspect(other)}")
-            {:ok, state}
-        end
+      other ->
+        Logger.error("Unexpected message #{inspect(other)}")
+        {:ok, state}
     end
   end
 
@@ -141,21 +216,9 @@ defmodule Ockam.Examples.StreamExample.Consumer do
 
   def fetch_request(index, limit) do
     :bare.encode(
-      {StreamExample.pull_request_schema(), %{index: index, limit: limit}},
+      {StreamExample.pull_request_schema(), %{request_id: :rand.uniform(100), index: index, limit: limit}},
       StreamExample.request_schema()
     )
-  end
-
-  def decode_message(message) do
-    payload = Ockam.Message.payload(message)
-
-    case :bare.decode(payload, {:struct, [index: :i64, data: :data]}) do
-      {:ok, %{index: index, data: data}, ""} ->
-        {:message, data, index}
-
-      other ->
-        {:decode_error, other}
-    end
   end
 end
 
@@ -163,6 +226,8 @@ defmodule Ockam.Examples.StreamExample.Publisher do
   use Ockam.Worker
 
   alias Ockam.Examples.StreamExample
+
+  alias Ockam.Message
 
   require Logger
 
@@ -183,36 +248,14 @@ defmodule Ockam.Examples.StreamExample.Publisher do
   def handle_message(message, state) do
     Logger.info("Publisher received message #{inspect(message)}")
 
-    case StreamExample.parse_create_response(message) do
-      {:ok, return_route} ->
-        {:ok, Map.put(state, :stream_address, return_route)}
-
-      :error ->
-        case decode_message(message) do
-          {:publish_confirm, id} ->
-            Logger.info("Publish confirm for message id #{inspect(id)}")
-            {:ok, state}
-
-          other ->
-            Logger.error("Unexpected message #{inspect(other)}")
-            {:ok, state}
-        end
-    end
-  end
-
-  def decode_message(message) do
-    payload = Ockam.Message.payload(message)
-
-    case :bare.decode(payload, {:struct, [status: {:enum, [:ok, :error]}, message_id: :i64]}) do
-      {:ok, %{status: :ok, message_id: id}, ""} ->
-        {:publish_confirm, id}
-
-      {:ok, %{status: :error, message_id: id}, ""} ->
-        Logger.error("Publish confirm error")
-        {:publish_confirm_error, id}
-
+    case StreamExample.parse_response(message) do
+      {:init, _data} ->
+        {:ok, Map.put(state, :stream_address, Message.return_route(message))}
+      {:push_confirm, data} ->
+        Logger.info("Publish confirm for request id #{inspect(data.request_id)} with index #{inspect(data.index)}")
       other ->
-        {:decode_error, other}
+        Logger.error("Unexpected message #{inspect(other)}")
+        {:ok, state}
     end
   end
 
@@ -229,7 +272,7 @@ defmodule Ockam.Examples.StreamExample.Publisher do
   end
 
   def send_message(message, address, state) do
-    next_id = Map.get(state, :message_id, 0) + 1
+    next_id = Map.get(state, :request_id, 0) + 1
 
     Ockam.Router.route(%{
       onward_route: address,
@@ -237,12 +280,12 @@ defmodule Ockam.Examples.StreamExample.Publisher do
       payload: message_request(message, next_id)
     })
 
-    Map.put(state, :message_id, next_id)
+    Map.put(state, :request_id, next_id)
   end
 
   def message_request(message, id) do
     :bare.encode(
-      {StreamExample.push_request_schema(), %{data: message, message_id: id}},
+      {StreamExample.push_request_schema(), %{data: message, request_id: id}},
       StreamExample.request_schema()
     )
   end
