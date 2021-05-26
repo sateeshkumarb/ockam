@@ -135,6 +135,12 @@ impl<M: Message> Routed<M> {
         self.inner
     }
 
+    /// Borrow the inner body
+    #[inline]
+    pub fn as_body(&self) -> &M {
+        &self.inner
+    }
+
     /// Consume the message wrapper to the underlying transport
     #[inline]
     pub fn into_transport_message(self) -> TransportMessage {
