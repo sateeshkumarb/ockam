@@ -7,8 +7,8 @@ defmodule Ockam.Hub do
 
   use Application
 
-  alias Ockam.Hub.Service.Alias, as: AliasService
   alias Ockam.Hub.Service.Echo, as: EchoService
+  alias Ockam.Hub.Service.Forwarding, as: ForwardingService
 
   alias Ockam.Stream.Index.Worker, as: StreamIndexService
   alias Ockam.Stream.Workers.Service, as: StreamService
@@ -36,7 +36,7 @@ defmodule Ockam.Hub do
     # TODO: add to supervision tree.
     EchoService.create(address: "echo_service")
 
-    AliasService.create(address: "forwarding_service")
+    ForwardingService.create(address: "forwarding_service")
 
     StreamService.create(address: "stream_service")
     StreamIndexService.create(address: "stream_index_service")
