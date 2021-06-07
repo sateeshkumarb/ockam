@@ -11,34 +11,26 @@ defmodule Test.Hub.Web.WebTest do
   @http_status_unauthorized 401
 
   test "create stream without authorization" do
-    conn =
-      conn(:post, "/streams", %{"stream_prefix" => "prefix"})
-      |> Router.call(@options)
-
+    conn = Router.call(conn(:post, "/streams", %{"stream_prefix" => "prefix"}), @options)
     assert conn.status == @http_status_unauthorized
   end
 
   test "create stream with prefix" do
     conn =
-      conn(:post, create_url("/streams"), %{"stream_prefix" => "prefix"})
-      |> Router.call(@options)
+      Router.call(conn(:post, create_url("/streams"), %{"stream_prefix" => "prefix"}), @options)
 
     assert conn.status == @http_status_ok
   end
 
   test "create stream with wrong prefix" do
     conn =
-      conn(:post, create_url("/streams"), %{"stream_pref" => "prefix"})
-      |> Router.call(@options)
+      Router.call(conn(:post, create_url("/streams"), %{"stream_pref" => "prefix"}), @options)
 
     assert conn.status == @http_status_bad_request
   end
 
   test "create stream without prefix" do
-    conn =
-      conn(:post, create_url("/streams"), %{})
-      |> Router.call(@options)
-
+    conn = Router.call(conn(:post, create_url("/streams"), %{}), @options)
     assert conn.status == @http_status_bad_request
   end
 
