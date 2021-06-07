@@ -6,16 +6,17 @@ defmodule Test.Hub.Service.EchoTest do
 
   test "echo test" do
     {:ok, proxy, proxy_address} =
-      Test.Hub.Service.TestEchoProxy.start_link(address: {192, 168, 1, 1})
+      Test.Hub.Service.EchoTestWorker.start_link(address: {192, 168, 1, 1})
 
     {:ok, _echo, _echo_address} = EchoService.start_link(address: {192, 168, 1, 2})
 
     msg = %{onward_route: [proxy_address], return_route: [], payload: self()}
-    r = Router.route(msg)
+    Router.route(msg)
 
     receive do
       :ok ->
         assert true
+
       other ->
         IO.puts("Received: #{inspect(other)}")
         assert false
@@ -27,7 +28,7 @@ defmodule Test.Hub.Service.EchoTest do
   end
 end
 
-defmodule Test.Hub.Service.TestEchoProxy do
+defmodule Test.Hub.Service.EchoTestWorker do
   @moduledoc false
 
   use Ockam.Worker
