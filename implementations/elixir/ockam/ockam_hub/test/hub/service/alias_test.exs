@@ -3,7 +3,7 @@ defmodule Test.Hub.Service.AliasTest do
 
   alias Ockam.Hub.Service.Alias, as: AliasService
   alias Ockam.Hub.Service.Echo, as: EchoService
-  
+
   alias Ockam.Router
 
   test "alias test" do
