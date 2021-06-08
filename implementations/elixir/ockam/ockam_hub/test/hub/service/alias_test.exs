@@ -35,7 +35,6 @@ defmodule Test.Hub.Service.AliasTestWorker do
   @impl true
   def handle_message(message, state) do
     case Message.return_route(message) do
-      [_address] -> process(message, state)
       [] -> registration(message, state)
       _other -> process(message, state)
     end
