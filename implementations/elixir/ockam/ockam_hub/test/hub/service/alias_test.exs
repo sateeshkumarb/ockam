@@ -3,31 +3,20 @@ defmodule Test.Hub.Service.AliasTest do
 
   alias Ockam.Hub.Service.Alias, as: AliasService
   alias Ockam.Hub.Service.Echo, as: EchoService
-
   alias Ockam.Router
+  alias Test.Utils
 
   test "alias test" do
     {:ok, _worker, worker_address} =
-      Test.Hub.Service.AliasTestWorker.start_link(address: {192, 168, 2, 1})
+      Test.Hub.Service.AliasTestWorker.start_link(address: "bdf373h28asdf")
 
-    {:ok, _alias, _alias_address} = AliasService.start_link(address: {192, 168, 2, 2})
-    {:ok, _echo, _echo_address} = EchoService.start_link(address: {192, 168, 2, 3})
+    {:ok, _alias, _alias_address} = AliasService.start_link(address: "cdf373h48asdf")
+    {:ok, _echo, _echo_address} = EchoService.start_link(address: "ddf373h47asdf")
 
-    msg = %{onward_route: [worker_address], return_route: [], payload: self()}
+    msg = %{onward_route: [worker_address], return_route: [], payload: Utils.pid_to_string()}
     Router.route(msg)
 
-    receive do
-      :ok ->
-        assert true
-
-      other ->
-        IO.puts("Received: #{inspect(other)}")
-        assert false
-    after
-      5_000 ->
-        IO.puts("Nothing was received after 5 seconds")
-        assert false
-    end
+    assert_receive(:ok, 5_000)
   end
 end
 
@@ -38,9 +27,10 @@ defmodule Test.Hub.Service.AliasTestWorker do
 
   alias Ockam.Message
   alias Ockam.Router
+  alias Test.Utils
 
-  @echo_address {192, 168, 2, 3}
-  @alias_address {192, 168, 2, 2}
+  @echo_address "ddf373h47asdf"
+  @alias_address "cdf373h48asdf"
 
   @impl true
   def handle_message(message, state) do
@@ -65,7 +55,12 @@ defmodule Test.Hub.Service.AliasTestWorker do
   end
 
   defp process(message, state) when state.status == :registered do
-    send(Message.payload(message)[:registration_payload], :ok)
+    message
+    |> Message.payload()
+    |> Map.get(:registration_payload)
+    |> Utils.string_to_pid()
+    |> send(:ok)
+
     {:ok, state}
   end
 end

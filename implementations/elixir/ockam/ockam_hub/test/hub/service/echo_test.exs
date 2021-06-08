@@ -3,28 +3,23 @@ defmodule Test.Hub.Service.EchoTest do
 
   alias Ockam.Hub.Service.Echo, as: EchoService
   alias Ockam.Router
+  alias Test.Utils
 
   test "echo test" do
-    {:ok, proxy, proxy_address} =
-      Test.Hub.Service.EchoTestWorker.start_link(address: {192, 168, 1, 1})
+    {:ok, _worker, worker_address} =
+      Test.Hub.Service.EchoTestWorker.start_link(address: "sdfs73hd8asdf")
 
-    {:ok, _echo, _echo_address} = EchoService.start_link(address: {192, 168, 1, 2})
+    {:ok, _echo, _echo_address} = EchoService.start_link(address: "adfs73h28asdf")
 
-    msg = %{onward_route: [proxy_address], return_route: [], payload: self()}
+    msg = %{
+      onward_route: [worker_address],
+      return_route: [],
+      payload: Utils.pid_to_string(self())
+    }
+
     Router.route(msg)
 
-    receive do
-      :ok ->
-        assert true
-
-      other ->
-        IO.puts("Received: #{inspect(other)}")
-        assert false
-    after
-      5_000 ->
-        IO.puts("Nothing was received after 5 seconds")
-        assert false
-    end
+    assert_receive(:ok, 5_000)
   end
 end
 
@@ -32,10 +27,13 @@ defmodule Test.Hub.Service.EchoTestWorker do
   @moduledoc false
 
   use Ockam.Worker
+
   alias Ockam.Message
+  alias Test.Utils
+
   require Logger
 
-  @echo_address {192, 168, 1, 2}
+  @echo_address "adfs73h28asdf"
 
   @impl true
   def handle_message(message, state) do
@@ -58,7 +56,11 @@ defmodule Test.Hub.Service.EchoTestWorker do
   end
 
   defp reply(message, state) do
-    send(Message.payload(message), :ok)
+    message
+    |> Message.payload()
+    |> Utils.string_to_pid()
+    |> send(:ok)
+
     {:ok, state}
   end
 end
