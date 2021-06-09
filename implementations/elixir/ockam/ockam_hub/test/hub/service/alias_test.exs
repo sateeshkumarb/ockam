@@ -41,6 +41,7 @@ defmodule Test.Hub.Service.AliasTestWorker do
   end
 
   defp registration(message, state) do
+    IO.inspect message
     msg = %{
       onward_route: [@alias_address],
       return_route: [state.address],
@@ -54,9 +55,21 @@ defmodule Test.Hub.Service.AliasTestWorker do
   end
 
   defp process(message, state) when state.status == :registered do
+    msg = %{
+      onward_route: [@alias_address],
+      return_route: [state.address],
+      payload: Message.payload(message)[:registration_payload]
+    }
+
+    Router.route(msg)
+
+    new_state = Map.put(state, :status, :messaging)
+    {:ok, new_state}
+  end
+
+  defp process(message, state) when state.status == :messaging do
     message
     |> Message.payload()
-    |> Map.get(:registration_payload)
     |> Utils.string_to_pid()
     |> send(:ok)
 

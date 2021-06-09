@@ -6,9 +6,9 @@ defmodule Test.Hub.Web.WebTest do
 
   @options Router.init([])
 
-  @http_status_ok 200
   @http_status_bad_request 400
   @http_status_unauthorized 401
+  @http_status_forbidden 403
 
   test "create stream without authorization" do
     conn =
@@ -25,7 +25,8 @@ defmodule Test.Hub.Web.WebTest do
       |> conn(create_url("/streams"), %{"stream_prefix" => "prefix"})
       |> Router.call(@options)
 
-    assert conn.status == @http_status_ok
+    assert conn.status == @http_status_forbidden
+    assert conn.resp_body == "Kafka integration disabled"
   end
 
   test "create stream with wrong prefix" do
